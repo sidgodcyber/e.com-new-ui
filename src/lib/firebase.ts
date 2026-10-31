@@ -14,6 +14,15 @@ import {
   arrayRemove,
   type Firestore,
 } from 'firebase/firestore';
+import {
+  getAuth,
+  signInWithPopup,
+  GoogleAuthProvider,
+  signOut as firebaseSignOut,
+  onAuthStateChanged,
+  type Auth,
+  type User as FirebaseUser,
+} from 'firebase/auth';
 import { getAnalytics, isSupported as isAnalyticsSupported, type Analytics } from 'firebase/analytics';
 import type { MenuItem } from '../types';
 import type { AdminOrder } from '../components/admin/adminData';
@@ -38,6 +47,32 @@ export const FIREBASE_API_KEY: string = firebaseConfig.apiKey;
 
 export const storage: FirebaseStorage = getStorage(app);
 export const db: Firestore = getFirestore(app);
+export const auth: Auth = getAuth(app);
+
+export const googleProvider = new GoogleAuthProvider();
+googleProvider.setCustomParameters({ prompt: 'select_account' });
+
+/**
+ * Sign in using Google popup. Returns the authenticated Firebase User.
+ */
+export async function loginWithGoogle(): Promise<FirebaseUser> {
+  const result = await signInWithPopup(auth, googleProvider);
+  return result.user;
+}
+
+/**
+ * Sign out current Firebase user.
+ */
+export async function logoutUser(): Promise<void> {
+  await firebaseSignOut(auth);
+}
+
+/**
+ * Listen to auth state changes (persisted session).
+ */
+export function subscribeToAuth(callback: (user: FirebaseUser | null) => void): () => void {
+  return onAuthStateChanged(auth, callback);
+}
 
 // Analytics only in browser + supported env. Never blocks app boot.
 export let analytics: Analytics | null = null;

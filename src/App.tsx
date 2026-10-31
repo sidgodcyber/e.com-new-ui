@@ -70,6 +70,7 @@ import {
   saveOutletToFirestore,
   subscribeToOutletSoldOut,
   patchOrderInFirestore,
+  subscribeToAuth,
 } from './lib/firebase';
 import { needsCustomize } from './lib/customize';
 import { 
@@ -1119,6 +1120,40 @@ export default function App() {
       // ignore
     }
   };
+
+  const logoutCustomerProfile = () => {
+    setCustomerProfile(null);
+    try {
+      localStorage.removeItem('seven_cheese_customer');
+    } catch {
+      // ignore
+    }
+  };
+
+  // Sync customerProfile with persistent Firebase Auth session
+  useEffect(() => {
+    const unsub = subscribeToAuth((fbUser) => {
+      if (fbUser) {
+        setCustomerProfile((prev) => {
+          const updated: CustomerProfile = {
+            name: fbUser.displayName || prev?.name || 'Customer',
+            phone: prev?.phone || fbUser.phoneNumber?.replace(/\D/g, '').replace(/^91/, '') || '',
+            email: fbUser.email || prev?.email || '',
+            photoURL: fbUser.photoURL || prev?.photoURL || '',
+            uid: fbUser.uid,
+            isGoogle: true,
+          };
+          try {
+            localStorage.setItem('seven_cheese_customer', JSON.stringify(updated));
+          } catch {
+            // ignore
+          }
+          return updated;
+        });
+      }
+    });
+    return () => unsub();
+  }, []);
   const [isAddressModalOpen, setIsAddressModalOpen] = useState(false);
   const [isDealsModalOpen, setIsDealsModalOpen] = useState(false);
 
@@ -1345,7 +1380,11 @@ export default function App() {
     const receiverName = delivery?.name?.trim() || 'Walk-in Customer';
     const receiverPhone = delivery?.phone?.trim() || '';
     if (delivery?.name?.trim() && receiverPhone) {
-      saveCustomerProfile({ name: delivery.name.trim(), phone: receiverPhone });
+      saveCustomerProfile({
+        ...(customerProfile || {}),
+        name: delivery.name.trim(),
+        phone: receiverPhone,
+      });
     }
     const orderLandmark = delivery?.landmark?.trim() || '';
     const fullDeliveryAddress =
@@ -1821,12 +1860,15 @@ export default function App() {
         onSelectSuggestion={handleSelectSuggestion}
         isTableLocked={!!qrTable}
         onOpenProfile={() => setIsProfileOpen(true)}
+        userPhoto={customerProfile?.photoURL}
+        userName={customerProfile?.name}
       />
       <ProfileDrawer
         isOpen={isProfileOpen}
         onClose={() => setIsProfileOpen(false)}
         profile={customerProfile}
         onSaveProfile={saveCustomerProfile}
+        onLogout={logoutCustomerProfile}
         hasActiveOrder={!!activeOrder}
         onOpenDeals={() => openOffers()}
         onTrackOrder={() => setIsOrderTrackerOpen(true)}
