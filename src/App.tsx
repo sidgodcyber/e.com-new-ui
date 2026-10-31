@@ -50,8 +50,10 @@ import { PwaInstallBanner, PwaOfflineBadge, PwaUpdatePrompt } from './components
 import { AdminLayout } from './components/admin/AdminLayout';
 import { AdminLogin } from './components/admin/AdminLogin';
 import { AdminDelivery } from './components/admin/AdminDelivery';
-import { AdminOrder, SEED_ADMIN_ORDERS } from './components/admin/adminData';
-import { Outlet, getOutletById, findNearestOutlet, geoDistanceKm, resolveOutletForOrder, parseOutletQrParam, parseTableQrParam, getTableById } from './components/admin/outlets';
+import { AdminOrder, SEED_ADMIN_ORDERS, newOrderId } from './components/admin/adminData';
+import { watchStaffSession, staffSignOut, type StaffSession } from './lib/auth';
+import { can } from './components/admin/permissions';
+import { getOutletById, findNearestOutlet, geoDistanceKm, resolveOutletForOrder, parseOutletQrParam, parseTableQrParam, getTableById, setLiveOutlets, useOutlets, isOutletOpen, formatHour, SEED_OUTLETS } from './components/admin/outlets';
 import {
   saveMenuItemToFirestore,
   deleteMenuItemFromFirestore,
@@ -63,6 +65,11 @@ import {
   updateOrderStatusInFirestore,
   deleteOrderFromFirestore,
   subscribeToFirestoreOrders,
+  subscribeToMyOrders,
+  subscribeToOutlets,
+  saveOutletToFirestore,
+  subscribeToOutletSoldOut,
+  patchOrderInFirestore,
 } from './lib/firebase';
 import { needsCustomize } from './lib/customize';
 import { 
@@ -209,21 +216,30 @@ export default function App() {
     return () => window.removeEventListener('popstate', sync);
   }, []);
 
-  // Logged-in outlet (admin POS). Kept in sessionStorage so login survives refresh.
-  const [adminOutlet, setAdminOutlet] = useState<Outlet | null>(() => {
-    const saved = sessionStorage.getItem('seven_cheese_admin_outlet');
-    return saved ? getOutletById(saved) || null : null;
-  });
-
-  const handleAdminLogin = (outlet: Outlet) => {
-    sessionStorage.setItem('seven_cheese_admin_outlet', outlet.id);
-    setAdminOutlet(outlet);
-  };
+  // Who is signed in to the admin / rider screens: their own Firebase login + staff profile (role, store).
+  const [staffSession, setStaffSession] = useState<StaffSession>({ status: 'loading' });
+  useEffect(() => watchStaffSession(setStaffSession), []);
+  const staff = staffSession.status === 'ready' ? staffSession.profile : null;
   const handleAdminLogout = () => {
-    sessionStorage.removeItem('seven_cheese_admin_outlet');
-    setAdminOutlet(null);
+    void staffSignOut();
     goView('home'); // logout ke baad reload pe login gate pe nahi, store pe aao
   };
+
+  // Stores: live from Firestore (cached on the device). The owner's first sign-in saves the 12 stores there.
+  const liveOutlets = useOutlets();
+  const [remoteStoreCount, setRemoteStoreCount] = useState<number | null>(null);
+  useEffect(
+    () =>
+      subscribeToOutlets((list) => {
+        setRemoteStoreCount(list.length);
+        setLiveOutlets(list);
+      }),
+    [],
+  );
+  useEffect(() => {
+    if (staff?.role !== 'owner' || remoteStoreCount !== 0) return;
+    SEED_OUTLETS.forEach((o) => saveOutletToFirestore(o).catch(() => {}));
+  }, [staff?.role, remoteStoreCount]);
 
   // QR-locked outlet: customer ne outlet QR scan kiya to order hamesha usi outlet ka.
   // URL ?outlet=xxx aate hi lock + persist, taaki refresh pe bhi lock rahe.
@@ -244,7 +260,10 @@ export default function App() {
     const oid = parseOutletQrParam();
     return oid ? parseTableQrParam(oid) : null;
   });
-  const qrTable = qrOutletId && qrTableId ? getTableById(qrOutletId, qrTableId) || null : null;
+  const qrTable =
+    qrOutletId && qrTableId
+      ? getTableById(qrOutletId, qrTableId) || { id: qrTableId, outletId: qrOutletId, name: `Table ${qrTableId.split('-t').pop()?.toUpperCase()}` }
+      : null;
 
   // QR link same-tab me khule / back-forward ho to lock bhi update ho.
   useEffect(() => {
@@ -431,6 +450,23 @@ export default function App() {
       return [];
     }
   });
+  // This phone's own online orders — a signed-out phone only ever reads these, never other customers'.
+  const [myOrderIds, setMyOrderIds] = useState<string[]>(() => {
+    try {
+      const p = JSON.parse(localStorage.getItem('seven_cheese_my_orders') || '[]');
+      return Array.isArray(p) ? p.filter((x) => typeof x === 'string').slice(0, 20) : [];
+    } catch {
+      return [];
+    }
+  });
+  const rememberMyOrder = (id: string) =>
+    setMyOrderIds((prev) => {
+      const next = [id, ...prev.filter((x) => x !== id)].slice(0, 20);
+      safeSet('seven_cheese_my_orders', JSON.stringify(next));
+      return next;
+    });
+  const watchedMyOrders = myOrderIds.slice(0, 3).join(',');
+
   // Manual reconnect counter — Refresh dabane pe subscription dobara lagti hai.
   const [syncRetry, setSyncRetry] = useState(0);
   useEffect(() => {
@@ -452,9 +488,29 @@ export default function App() {
         });
       }
     }, 10000);
-    const unsub = subscribeToFirestoreOrders(
+    const watchScope = staff ? (staff.role === 'owner' ? 'all' : staff.outletId || '__none__') : null;
+    const watchIds = watchedMyOrders ? watchedMyOrders.split(',') : [];
+    if (watchScope === null && watchIds.length === 0) {
+      window.clearTimeout(timer);
+      setOrderSyncStatus('live');
+      setOrderSyncError('');
+      return () => {};
+    }
+    const backfilled = new Set<string>();
+    const subscribe = (onRemote: (r: AdminOrder[]) => void, onErr: (m: string) => void) =>
+      watchScope !== null ? subscribeToFirestoreOrders(watchScope, onRemote, onErr) : subscribeToMyOrders(watchIds, onRemote, onErr);
+    const unsub = subscribe(
       (remote) => {
         gotFirstSnapshot = true;
+        // Orders from before stores were tagged belong to Unchapul.
+        if (staff?.role === 'owner') {
+          remote
+            .filter((o) => !o.outletId && !backfilled.has(o.id))
+            .forEach((o) => {
+              backfilled.add(o.id);
+              patchOrderInFirestore(o.id, { outletId: 'outlet-1' }).catch(() => {});
+            });
+        }
         window.clearTimeout(timer);
         setOrderSyncStatus('live');
         setOrderSyncError('');
@@ -470,7 +526,7 @@ export default function App() {
         }
         // Tombstoned ids Firestore me abhi bhi dikhe to dobara delete (dusre device / fail retry se bache).
         const stillThere = remote.filter((r) => deletedIdsRef.current.includes(r.id));
-        stillThere.forEach((r) => deleteOrderFromFirestore(r.id).catch(() => {}));
+        if (staff && can(staff, 'delete-order')) stillThere.forEach((r) => deleteOrderFromFirestore(r.id).catch(() => {}));
         if (!remote.length) return;
         setAdminOrders((prev) => {
           const tombs = new Set(deletedIdsRef.current);
@@ -502,7 +558,8 @@ export default function App() {
       window.clearTimeout(timer);
       unsub();
     };
-  }, [syncRetry]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncRetry, staff?.uid, staff?.role, staff?.outletId, watchedMyOrders]);
 
   // Live Coupons State (Syncs with Admin)
   const [coupons, setCoupons] = useState<Coupon[]>(() => {
@@ -776,7 +833,7 @@ export default function App() {
           setAddresses((prev) => [addr, ...prev.filter((a) => a.id !== addr.id)]);
           setCurrentAddress(addr);
           setLocationNote(
-            `Delivering to ${place.address}${place.city ? ', ' + place.city : ''} · nearest outlet: ${nearest.outlet.name} (${nearest.distanceKm} km)`,
+            `Delivering to ${place.address}${place.city ? ', ' + place.city : ''} · nearest store: ${nearest.outlet.shortName} (${nearest.distanceKm} km)`,
           );
         });
       },
@@ -803,6 +860,16 @@ export default function App() {
     }
   };
 
+  // Signed-out phones keep only their own orders (older versions saved every order on every phone).
+  useEffect(() => {
+    if (staffSession.status === 'loading' || staff) return;
+    const mine = new Set([...myOrderIds, ...pendingOrderIds]);
+    setAdminOrders((prev) => {
+      const kept = prev.filter((o) => mine.has(o.id));
+      return kept.length === prev.length ? prev : kept;
+    });
+  }, [staffSession.status, staff, myOrderIds, pendingOrderIds]);
+
   // Badge distance priority: real GPS fix > selected address ka GPS pin > purana hardcoded distanceKm
   const outletInfo = useMemo(() => {
     if (typeof currentAddress.lat === 'number' && typeof currentAddress.lng === 'number') {
@@ -810,7 +877,17 @@ export default function App() {
     }
     if (userGps) return findNearestOutlet(userGps.lat, userGps.lng);
     return resolveOutletForOrder(currentAddress.lat, currentAddress.lng);
-  }, [userGps, currentAddress.lat, currentAddress.lng]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userGps, currentAddress.lat, currentAddress.lng, liveOutlets]);
+
+  // The store this customer's order goes to: a QR scan wins, else the nearest store.
+  const customerOutlet = qrOutlet ?? outletInfo.outlet;
+  // Items that store has marked sold out.
+  const [storeSoldOut, setStoreSoldOut] = useState<Set<string>>(() => new Set());
+  useEffect(
+    () => subscribeToOutletSoldOut(customerOutlet.id, (ids) => setStoreSoldOut(new Set(ids))),
+    [customerOutlet.id],
+  );
 
   // Cart & Customization State
   const [cartItems, setCartItems] = useState<CartItem[]>(() => {
@@ -838,11 +915,18 @@ export default function App() {
       menuItems.filter(
         (m) =>
           m.isAvailable !== false &&
+          !storeSoldOut.has(m.id) &&
           isOfferActive(m, now) &&
           !(dayDealDay && m.id.startsWith('p-offer-lunch-')),
       ),
-    [menuItems, now, dayDealDay],
+    [menuItems, now, dayDealDay, storeSoldOut],
   );
+  // Outside opening hours (or switched off) the store takes no online orders.
+  const storeClosedNote = isOutletOpen(customerOutlet, now)
+    ? ''
+    : customerOutlet.active === false
+      ? `${customerOutlet.shortName} store is not taking orders right now.`
+      : `${customerOutlet.shortName} store is closed now · opens ${formatHour(customerOutlet.opensAt)}`;
   // While a deal runs (Tuesday / Friday / lunch) show just its banners;
   // otherwise show the generic upsell banners (and any "Always" banners).
   const activeSlides = useMemo(() => {
@@ -1190,11 +1274,12 @@ export default function App() {
   };
 
   const handlePlaceOrder = (notes: string, paymentMethod?: string, delivery?: DeliveryDetails) => {
+    if (storeClosedNote) return;
     const subtotal = cartTotal;
     const couponValid = appliedCoupon && isOfferActive(appliedCoupon, new Date()) ? appliedCoupon : null;
     const isFreeDel = subtotal >= 99;
     const deliveryFee = orderType === 'DELIVERY' ? (isFreeDel ? 0 : 40) : 0;
-    const taxesAndCharges = taxesAndChargesFor(subtotal);
+    const taxesAndCharges = taxesAndChargesFor(subtotal, customerOutlet.gstRate);
     
     const best = bestDiscount(subtotal, couponValid, dayDeal?.discount ?? 0);
     const discount = best.discount;
@@ -1207,7 +1292,7 @@ export default function App() {
 
     // Delivery estimate for this address: ~15 min to prepare + ~3 min per km (≈20 km/h),
     // kept between 20 and 60 min. The tracker counts down to it.
-    const etaOutlet = qrOutlet ?? resolveOutletForOrder(currentAddress.lat, currentAddress.lng).outlet;
+    const etaOutlet = customerOutlet;
     const etaKm =
       typeof currentAddress.lat === 'number' && typeof currentAddress.lng === 'number'
         ? geoDistanceKm(currentAddress.lat, currentAddress.lng, etaOutlet.lat, etaOutlet.lng)
@@ -1215,7 +1300,8 @@ export default function App() {
     const etaMinutes = Math.min(60, Math.max(20, Math.round(15 + etaKm * 3)));
 
     // One id + number shared by the customer's tracker and the restaurant's order.
-    const adminOrderId = `ord-${Date.now()}`;
+    const adminOrderId = newOrderId();
+    rememberMyOrder(adminOrderId);
     const orderNumber = `#7C-${Math.floor(1000 + Math.random() * 9000)}`;
     // Free Choco Lava Cake when the items reach the threshold — not with another offer.
     const freeGiftLine: CartItem | null =
@@ -1252,10 +1338,8 @@ export default function App() {
       riderPhone: '+91 98912 34567',
     };
 
-    // Assign outlet: QR scan lock wins, else nearest from GPS, else Outlet 1.
-    const orderOutlet =
-      qrOutlet ??
-      resolveOutletForOrder(currentAddress.lat, currentAddress.lng).outlet;
+    // Assign outlet: QR scan lock wins, else the nearest store (same one the cart showed).
+    const orderOutlet = customerOutlet;
 
     // Real receiver details from checkout (Domino's-style form) — no more dummy data.
     const receiverName = delivery?.name?.trim() || 'Walk-in Customer';
@@ -1350,13 +1434,15 @@ export default function App() {
       const p = menuItems.find((m) => m.id === line.productId) || MENU_ITEMS.find((m) => m.id === line.productId);
       if (!p) return;
       if (p.isAvailable === false) out[line.cartItemId] = 'Sold out right now — remove to order';
+      else if (storeSoldOut.has(p.id)) out[line.cartItemId] = `Sold out at ${customerOutlet.shortName} — remove to order`;
       else if (!isOfferActive(p, now)) {
         const when = describeSchedule(p.days || p.startTime ? p : OFFER_SCHEDULES[p.id]);
         out[line.cartItemId] = `Available ${when || 'at set times'} only — remove to order`;
       }
     });
     return out;
-  }, [cartItems, menuItems, now]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cartItems, menuItems, now, storeSoldOut, customerOutlet.id]);
 
   // Tuesday Treat / Funday Friday worked out on the cart.
   const dayDeal = useMemo(() => computeDayDeal(cartItems, menuItems, now), [cartItems, menuItems, now]);
@@ -1545,13 +1631,17 @@ export default function App() {
     );
   }
 
-  // If we're on the Admin POS page, render login gate first, then AdminLayout
-  if (currentView === 'admin' && !adminOutlet) {
+  // Admin / rider screens: staff log in with their own username. The role decides what opens.
+  if ((currentView === 'admin' || currentView === 'delivery') && !staff) {
+    if (staffSession.status === 'loading') {
+      return <div className="min-h-screen flex items-center justify-center bg-slate-100 text-sm font-bold text-slate-500">Loading…</div>;
+    }
     return (
       <>
         <AdminLogin
-          onLogin={handleAdminLogin}
+          mode={currentView === 'admin' ? 'admin' : 'rider'}
           onBackToStore={() => goView('home')}
+          notice={staffSession.status === 'denied' ? staffSession.message : undefined}
         />
         <PwaOfflineBadge />
         <PwaUpdatePrompt />
@@ -1559,14 +1649,12 @@ export default function App() {
     );
   }
 
-  // If we're on the Admin POS page, render AdminLayout
-  // All orders are passed; AdminLayout offers an outlet scope toggle (default: all).
-  if (currentView === 'admin' && adminOutlet) {
+  if (currentView === 'admin' && staff && staff.role !== 'rider') {
     return (
       <>
       <AdminErrorBoundary onReset={() => goView('home')}>
       <AdminLayout
-        outlet={adminOutlet}
+        staff={staff}
         orders={adminOrders}
         syncStatus={orderSyncStatus}
         syncError={orderSyncError}
@@ -1628,23 +1716,26 @@ export default function App() {
     );
   }
 
-  // Rider view (/delivery ya /rider): login gate, phir sirf delivery queue — menu/POS access nahi.
-  if (currentView === 'delivery' && !adminOutlet) {
+  // Rider view (/delivery ya /rider): sirf delivery queue — menu/POS access nahi.
+  // Counter / kitchen staff logins don't open it.
+  if (currentView === 'delivery' && staff && !can(staff, 'rider-screen')) {
     return (
-      <>
-        <AdminLogin
-          mode="rider"
-          onLogin={handleAdminLogin}
-          onBackToStore={() => goView('home')}
-        />
-        <PwaOfflineBadge />
-        <PwaUpdatePrompt />
-      </>
+      <div className="min-h-screen flex items-center justify-center bg-slate-100 p-4">
+        <div className="bg-white rounded-3xl border border-slate-200 p-6 max-w-sm text-center space-y-3">
+          <p className="text-sm font-bold text-slate-800">Your login opens the admin panel, not the delivery screen.</p>
+          <button onClick={() => goView('admin')} className="w-full bg-[#ED1C24] text-white py-2.5 rounded-xl text-sm font-black cursor-pointer">Open admin panel</button>
+          <button onClick={handleAdminLogout} className="w-full text-xs font-bold text-slate-500 cursor-pointer">Log out</button>
+        </div>
+      </div>
     );
   }
 
-  if (currentView === 'delivery' && adminOutlet) {
-    const riderOrders = adminOrders.filter((o) => !o.outletId || o.outletId === adminOutlet.id);
+  if ((currentView === 'delivery' || currentView === 'admin') && staff) {
+    const riderOrders =
+      staff.role === 'owner'
+        ? adminOrders
+        : adminOrders.filter((o) => o.outletId === staff.outletId || (!o.outletId && staff.outletId === 'outlet-1'));
+    const riderStore = getOutletById(staff.outletId || '')?.shortName ?? 'All stores';
     return (
       <div className="min-h-screen bg-slate-100 text-slate-900 font-sans pb-10">
         {/* Rider header */}
@@ -1656,7 +1747,7 @@ export default function App() {
               </div>
               <div className="min-w-0">
                 <h1 className="text-sm font-black tracking-tight leading-tight truncate">
-                  Rider • {adminOutlet.shortName}
+                  Rider • {riderStore}
                 </h1>
                 <span className={`text-[10px] font-bold ${orderSyncStatus === 'live' ? 'text-emerald-400' : orderSyncStatus === 'connecting' ? 'text-amber-400' : 'text-red-400'}`}>
                   {orderSyncStatus === 'live' ? '● Live orders' : orderSyncStatus === 'connecting' ? '● Connecting…' : '● Offline — retry'}
@@ -2277,6 +2368,8 @@ export default function App() {
         onEditItem={handleEditCartItem}
         unavailableLines={unavailableLines}
         dayDeal={dayDeal}
+        gstRate={customerOutlet.gstRate}
+        storeClosedNote={storeClosedNote}
         onProceedToCheckout={() => {
           setIsCartOpen(false);
           goView('billing');

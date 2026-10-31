@@ -47,6 +47,10 @@ interface CartDrawerProps {
   unavailableLines?: Record<string, string>;
   /** Tuesday Treat / Funday Friday result for this cart. */
   dayDeal?: DayDealResult | null;
+  /** GST rate of the store this order goes to (0.05 or 0). */
+  gstRate?: number;
+  /** Set when the store is closed / not taking orders: shown on top and blocks checkout. */
+  storeClosedNote?: string;
   onPlaceOrder?: (notes: string, paymentMethod: string, delivery?: DeliveryDetails) => void;
   onQuickAdd: (productId: string) => void;
   onUpgradeItem?: (cartItemId: string) => void;
@@ -142,6 +146,8 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   onEditItem,
   unavailableLines = {},
   dayDeal = null,
+  gstRate = 0,
+  storeClosedNote = '',
   onPlaceOrder,
   onQuickAdd,
   onUpgradeItem,
@@ -188,7 +194,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   const freeDeliveryThreshold = 99;
   const isFreeDeliveryEligible = subtotal >= freeDeliveryThreshold;
   const deliveryFee = orderType === 'DELIVERY' ? (isFreeDeliveryEligible ? 0 : 40) : 0;
-  const taxesAndCharges = taxesAndChargesFor(subtotal);
+  const taxesAndCharges = taxesAndChargesFor(subtotal, gstRate);
 
   // Day deal and coupon don't stack — the bigger saving applies.
   const best = bestDiscount(subtotal, appliedCoupon, dayDeal?.discount ?? 0);
@@ -218,6 +224,10 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   const handleCompleteOrder = () => {
     setFormError('');
     setFieldError({});
+    if (storeClosedNote) {
+      setFormError(storeClosedNote);
+      return;
+    }
     if (Object.keys(unavailableLines).length) {
       setFormError('Some items in your cart are not available right now. Remove them to place the order.');
       return;
@@ -388,6 +398,13 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Store closed */}
+        {cartItems.length > 0 && storeClosedNote && (
+          <div role="alert" className="px-[max(0.875rem,calc((100%_-_48rem)/2))] py-2 text-xs font-bold border-b bg-red-50 border-red-200 text-red-800">
+            🕙 {storeClosedNote}. You can keep your cart and order when it opens.
           </div>
         )}
 
@@ -1093,7 +1110,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
 
                 {taxesAndCharges > 0 && (
                   <div className="flex justify-between text-slate-600">
-                    <span>Taxes & Restaurant Packaging</span>
+                    <span>GST ({Math.round(gstRate * 100)}%)</span>
                     <span className="font-mono font-semibold">₹{taxesAndCharges}</span>
                   </div>
                 )}

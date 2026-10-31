@@ -1,5 +1,6 @@
 import type { AdminOrder } from './adminData';
 import { tableLabel, itemBuildText } from './adminData';
+import { getOutletById, type BillHeader } from './outlets';
 
 // Thermal 80mm bills — same-to-same like Rushda counter printouts.
 // Bill 1 (customer): TAX INVOICE. Bill 2 (owner): KOT.
@@ -36,6 +37,10 @@ export interface ThermalBillData {
   cgstAmt: number;
   sgstBase: number;
   sgstAmt: number;
+  /** The store's own bill header; falls back to Unchapul's. */
+  header?: BillHeader;
+  /** GST rate of the store (0.05 = 2.5% CGST + 2.5% SGST). */
+  gstRate?: number;
 }
 
 export const STORE_HEADER = {
@@ -46,6 +51,20 @@ export const STORE_HEADER = {
   gstin: '', // GSTIN removed as requested
   soldBy: 'person 1',
 };
+
+/** Bill header for a store (its own address, phones, GSTIN, FSSAI, heading). */
+export function billHeaderFor(outletId?: string): BillHeader {
+  const o = outletId ? getOutletById(outletId) : undefined;
+  return (
+    o?.bill ?? {
+      title: 'TAX INVOICE',
+      lines: [STORE_HEADER.addr1, STORE_HEADER.addr2],
+      phones: STORE_HEADER.phone.replace('Phone : ', ''),
+    }
+  );
+}
+
+const pct = (rate: number) => `${+(rate * 50).toFixed(2)} %`;
 
 const esc = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -98,13 +117,16 @@ function buildCustomerBody(d: ThermalBillData): string {
     <div>${esc(l.name)}</div>
     <div class="row"><span>${esc(l.size)}</span><span>${l.qty}</span><span>${l.rate}</span><span>${l.disPct} %</span><span>${l.amt.toFixed(2)}</span></div>`
   ).join('');
+  const h = d.header ?? billHeaderFor();
+  const half = pct(d.gstRate ?? 0.05);
   return `
-    <div class="c">TAX INVOICE</div>
+    <div class="c">${esc(h.title)}</div>
+    ${h.subtitle ? `<div class="c">${esc(h.subtitle)}</div>` : ''}
     <div class="c b lg">${STORE_HEADER.name}</div>
-    <div class="c">${STORE_HEADER.addr1}</div>
-    <div class="c">${STORE_HEADER.addr2}</div>
-    <div class="c">${STORE_HEADER.phone}</div>
-    ${STORE_HEADER.gstin ? `<div class="c">${STORE_HEADER.gstin}</div>` : ''}
+    ${h.lines.map((l) => `<div class="c">${esc(l)}</div>`).join('')}
+    <div class="c">Phone : ${esc(h.phones)}</div>
+    ${h.gstin ? `<div class="c">GSTIN : ${esc(h.gstin)}</div>` : ''}
+    ${h.fssai ? `<div class="c">FSSAI No. : ${esc(h.fssai)}</div>` : ''}
     <br>
     <div class="c">Bill Type : ${esc(d.billTypeLabel)}</div>
     <div class="row"><span>Invoice No. : ${esc(d.serialNo)}</span><span>Date ${esc(d.dateStr)}</span></div>
@@ -121,8 +143,8 @@ function buildCustomerBody(d: ThermalBillData): string {
     ${d.gstTotal > 0 ? `<div>GST : ${d.gstTotal.toFixed(2)}</div>` : ''}
     ${d.discount ? `<div>Discount${d.discountLabel ? ` (${d.discountLabel})` : ''} : -${d.discount.toFixed(2)}</div>` : ''}
     <div class="row"><span>&nbsp;</span><span>Grand Total &nbsp;&nbsp;&nbsp;&nbsp; ${d.grandTotal.toFixed(2)}</span></div>
-    ${d.gstTotal > 0 ? `<div>CGST ${d.cgstBase} @ 2.5 % : ${d.cgstAmt.toFixed(2)}</div>
-    <div>SGST ${d.sgstBase} @ 2.5 % : ${d.sgstAmt.toFixed(2)}</div>` : ''}
+    ${d.gstTotal > 0 ? `<div>CGST ${d.cgstBase} @ ${half} : ${d.cgstAmt.toFixed(2)}</div>
+    <div>SGST ${d.sgstBase} @ ${half} : ${d.sgstAmt.toFixed(2)}</div>` : ''}
     <hr>
     <div class="c">User : ${esc(d.soldBy)}</div>
     <div class="c b">THANKS FOR YOUR KIND VISIT</div>
@@ -148,12 +170,14 @@ function buildKotBody(d: ThermalBillData): string {
 }
 
 // Online/counter order -> thermal print data (sales TAX INVOICE + KOT, single job)
-export function orderToThermal(o: AdminOrder): ThermalBillData {
+export function orderToThermal(o: AdminOrder, soldBy?: string): ThermalBillData {
   const serial = o.orderNumber.replace('#7C-', '').replace('#', '');
   const now = new Date();
   const dateStr = o.billDateIso
     ? o.billDateIso.split('-').reverse().join('-')
     : now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).replace(/ /g, '-');
+  // GST rate as charged on the order (tax / items), so old orders print as they were billed.
+  const rate = o.tax > 0 && o.subtotal > 0 ? Math.round((o.tax / Math.max(1, o.subtotal - (o.discount || 0))) * 100) / 100 : 0;
   const lines = (o.items || []).map((it) => ({
     name: (it.name || '').toUpperCase(),
     size: it.size || '',
@@ -161,10 +185,11 @@ export function orderToThermal(o: AdminOrder): ThermalBillData {
     qty: it.quantity,
     rate: it.price,
     disPct: 0,
-    amt: it.quantity * it.price,
+    amt: Math.round(it.quantity * it.price * (1 + rate) * 100) / 100,
   }));
   const taxable = Math.max(0, o.subtotal - (o.discount || 0));
   const base = Math.round(taxable);
+  const halfTax = Math.round(((o.tax || 0) / 2) * 100) / 100;
   return {
     serialNo: serial,
     dateStr,
@@ -173,7 +198,7 @@ export function orderToThermal(o: AdminOrder): ThermalBillData {
     customerName: (o.customerName || 'WALK-IN').toUpperCase(),
     address: o.tableNumber ? tableLabel(o.tableNumber) : (o.address || ''),
     phone: o.customerPhone || o.partyPhone || '',
-    soldBy: STORE_HEADER.soldBy,
+    soldBy: (soldBy || o.soldBy || 'Online').toUpperCase(),
     lines,
     totalQty: lines.reduce((s, l) => s + l.qty, 0),
     totalAmt: o.subtotal + (o.tax || 0),
@@ -182,9 +207,11 @@ export function orderToThermal(o: AdminOrder): ThermalBillData {
     discount: o.discount || 0,
     discountLabel: o.discountLabel,
     cgstBase: base,
-    cgstAmt: (o.tax || 0) > 0 ? base * 0.025 : 0,
+    cgstAmt: halfTax,
     sgstBase: base,
-    sgstAmt: (o.tax || 0) > 0 ? base * 0.025 : 0,
+    sgstAmt: halfTax,
+    header: billHeaderFor(o.outletId || 'outlet-1'),
+    gstRate: rate || 0.05,
   };
 }
 

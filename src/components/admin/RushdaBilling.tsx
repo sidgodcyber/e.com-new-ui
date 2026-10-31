@@ -17,11 +17,11 @@ import {
 } from 'lucide-react';
 import type { MenuItem } from '../../types';
 import type { AdminOrder } from './adminData';
-import { localDateIso, tableLabel } from './adminData';
-import { GST_RATE } from '../../lib/billing';
+import { localDateIso, tableLabel, newOrderId } from './adminData';
 import type { Outlet } from './outlets';
 import {
   STORE_HEADER,
+  billHeaderFor,
   buildCustomerBillHtml,
   buildKotBillHtml,
   buildCombinedBillHtml,
@@ -80,9 +80,14 @@ interface RushdaBillingProps {
   orders: AdminOrder[];
   menuItems: MenuItem[];
   onCreateOrder: (order: AdminOrder) => void;
-  onAddItem: (item: MenuItem) => void;
-  onUpdateItem: (item: MenuItem) => void;
-  onDeleteItem: (id: string) => void;
+  /** Item master (owner only). */
+  onAddItem?: (item: MenuItem) => void;
+  onUpdateItem?: (item: MenuItem) => void;
+  onDeleteItem?: (id: string) => void;
+  /** Logged-in person, printed as "Sold by" / "User". */
+  soldBy?: string;
+  /** Sale report (owner / manager). */
+  canReport?: boolean;
 }
 
 function load<T>(key: string, fallback: T): T {
@@ -147,6 +152,8 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
   onAddItem,
   onUpdateItem,
   onDeleteItem,
+  soldBy,
+  canReport = true,
 }) => {
   const [module, setModule] = useState<ModuleKey>('SALE');
   const billMode: BillMode = module === 'SALE' || module === 'KOT' || module === 'HOME' ? module : 'SALE';
@@ -230,7 +237,7 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
         qty,
         rate,
         disPct: 0,
-        taxPct: taxMap[menu.id] ?? GST_RATE * 100,
+        taxPct: taxMap[menu.id] ?? outlet.gstRate * 100,
       }];
     });
   };
@@ -281,9 +288,10 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
     const billCustomerName =
       custName.trim() || activeParty?.name || 'CASH SALE';
     const order: AdminOrder = {
-      id: `ord-${Date.now()}`,
+      id: newOrderId(),
       orderNumber,
       outletId: outlet.id,
+      soldBy: soldBy || undefined,
       customerName: billCustomerName,
       customerPhone: phoneNo || activeParty?.phone || '',
       orderType,
@@ -342,7 +350,9 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
       customerName: billCustomerName.toUpperCase(),
       address: tableNo ? tableLabel(tableNo) : (activeParty?.address ?? ''),
       phone: phoneNo || activeParty?.phone || '',
-      soldBy: STORE_HEADER.soldBy,
+      soldBy: (soldBy || STORE_HEADER.soldBy).toUpperCase(),
+      header: billHeaderFor(outlet.id),
+      gstRate: outlet.gstRate,
       lines: lines.map((l) => {
         const amt = l.qty * l.rate;
         const dis = discountFix ? 0 : (amt * l.disPct) / 100;
@@ -354,9 +364,9 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
       gstTotal: totals.tax,
       grandTotal: Math.round(totals.net),
       cgstBase: base,
-      cgstAmt: (base * GST_RATE) / 2,
+      cgstAmt: (base * outlet.gstRate) / 2,
       sgstBase: base,
-      sgstAmt: (base * GST_RATE) / 2,
+      sgstAmt: (base * outlet.gstRate) / 2,
     };
     setLastBill(thermal);
     clearBill();
@@ -393,8 +403,8 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
       image: existing?.image ?? '/images/seven_cheese_pizza_1788869697088.jpg',
       isCustomizable: existing?.isCustomizable ?? false,
     };
-    if (existing) onUpdateItem(payload);
-    else onAddItem(payload);
+    if (existing) onUpdateItem?.(payload);
+    else onAddItem?.(payload);
     const nu = { ...unitMap, [code]: fUnit };
     const nt = { ...taxMap, [code]: Number(fTax) || 0 };
     setUnitMap(nu); setTaxMap(nt);
@@ -497,12 +507,12 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
         if (repSize !== 'all' && size !== repSize) return;
         if (repItem && !it.name.toLowerCase().includes(repItem.toLowerCase())) return;
         const amount = it.quantity * it.price;
-        const tax = (amount * GST_RATE * 100) / 100;
+        const tax = (amount * outlet.gstRate * 100) / 100;
         rows.push({
           date: iso, sno: o.orderNumber, party: o.customerName,
           category: cat, item: it.name, size,
           qty: it.quantity, rate: it.price, amount,
-          disPct: 0, taxPct: GST_RATE * 100, tax, net: amount + tax,
+          disPct: 0, taxPct: outlet.gstRate * 100, tax, net: amount + tax,
         });
       });
     });
@@ -547,7 +557,7 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
     { id: 'HOME', label: 'Home Delivery' },
     { id: 'PARTY', label: 'Customers' },
     { id: 'OFFER', label: 'Counter discounts' },
-    { id: 'REPORT', label: 'Sale Report' },
+    ...(canReport ? [{ id: 'REPORT' as ModuleKey, label: 'Sale Report' }] : []),
   ];
 
   return (
@@ -556,7 +566,7 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
       <div className="bg-white rounded-lg border border-slate-200 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
           <div className="text-base font-bold text-slate-900">Counter Billing</div>
-          <div className="text-xs text-slate-500">{outlet.area}</div>
+          <div className="text-xs text-slate-500">{outlet.shortName}{outlet.gstRate ? ' · GST 5%' : ''}</div>
         </div>
         {lastBillNo && (
           <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
@@ -828,7 +838,7 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
                               >
                                 <Pencil className="w-3 h-3" />
                               </button>
-                              <button onClick={() => onDeleteItem(m.id)} className="p-1 rounded-lg bg-red-50 text-red-600 cursor-pointer">
+                              <button onClick={() => onDeleteItem?.(m.id)} className="p-1 rounded-lg bg-red-50 text-red-600 cursor-pointer">
                                 <Trash2 className="w-3 h-3" />
                               </button>
                             </div>
