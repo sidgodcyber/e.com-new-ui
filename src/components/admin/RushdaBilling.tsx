@@ -591,7 +591,7 @@ export const RushdaBilling: React.FC<RushdaBillingProps> = ({
                   onClick={() => printThermal(buildCombinedBillHtml(lastBill))}
                   className="flex items-center gap-1 bg-emerald-600 text-white px-3 py-1.5 rounded-lg cursor-pointer"
                 >
-                  <Printer className="w-3.5 h-3.5" /> Both Together
+                  <Printer className="w-3.5 h-3.5" /> Bill + KOT
                 </button>
               </>
             )}
