@@ -1,5 +1,4 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
-import { getStorage, ref, uploadBytesResumable, getDownloadURL, type FirebaseStorage } from 'firebase/storage';
 import {
   getFirestore,
   collection,
@@ -45,7 +44,6 @@ const app: FirebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) 
 export const FIREBASE_PROJECT_ID: string = firebaseConfig.projectId;
 export const FIREBASE_API_KEY: string = firebaseConfig.apiKey;
 
-export const storage: FirebaseStorage = getStorage(app);
 export const db: Firestore = getFirestore(app);
 export const auth: Auth = getAuth(app);
 
@@ -90,159 +88,6 @@ if (typeof window !== 'undefined') {
     .catch(() => {
       analytics = null;
     });
-}
-
-const MAX_IMAGE_MB = 5;
-const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-
-function sanitizeFileName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9.]+/g, '-').replace(/-+/g, '-').slice(0, 80);
-}
-
-/**
- * Upload menu item image to Firebase Storage.
- * Returns public download URL. Shows progress via callback (0-100).
- */
-export function uploadMenuImage(
-  file: File,
-  onProgress?: (pct: number) => void
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    if (!ALLOWED_TYPES.includes(file.type)) {
-      reject(new Error('Only JPG / PNG / WebP / GIF images are allowed.'));
-      return;
-    }
-    if (file.size > MAX_IMAGE_MB * 1024 * 1024) {
-      reject(new Error(`Image must be smaller than 5MB. (got ${(file.size / 1024 / 1024).toFixed(1)}MB)`));
-      return;
-    }
-
-    const path = `menu-items/${Date.now()}-${sanitizeFileName(file.name)}`;
-    const storageRef = ref(storage, path);
-    const task = uploadBytesResumable(storageRef, file, { contentType: file.type });
-
-    let settled = false;
-    const fail = (msg: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      try {
-        task.cancel();
-      } catch {
-        // ignore
-      }
-      reject(new Error(msg));
-    };
-
-    // No progress/error within 60s → treat as stuck, explain the likely cause
-    const timeoutId = setTimeout(() => {
-      fail(
-        'Upload stuck at 0% for 60s. This usually means the Storage bucket does not exist yet or the network is blocked. ' +
-          'In Firebase console go to Build → Storage → Get Started, create the bucket, then retry.'
-      );
-    }, 60000);
-
-    task.on(
-      'state_changed',
-      (snap) => {
-        const pct = Math.round((snap.bytesTransferred / snap.totalBytes) * 100);
-        onProgress?.(pct);
-      },
-      (err) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        if (err.code === 'storage/unauthorized') {
-          reject(new Error('Storage permission denied. In Console → Storage → Security, allow read + write to publish.'));
-        } else if (err.code === 'storage/canceled') {
-          reject(new Error('Upload was cancelled.'));
-        } else if (err.code === 'storage/bucket-not-found' || err.code === 'storage/project-not-found') {
-          reject(new Error('Storage bucket not found. In Console go to Build → Storage → Get Started to create the bucket, then retry.'));
-        } else if (err.code === 'storage/retry-limit-exceeded' || err.code === 'storage/unknown') {
-          reject(new Error('Network/bucket issue. First confirm the Storage bucket exists (Get Started), then retry with a smaller image.'));
-        } else {
-          reject(new Error(`Upload fail: ${err.code || err.message}`));
-        }
-      },
-      async () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        try {
-          const url = await getDownloadURL(task.snapshot.ref);
-          resolve(url);
-        } catch (e) {
-          reject(e instanceof Error ? e : new Error('Download URL not received.'));
-        }
-      }
-    );
-  });
-}
-
-/**
- * Upload an already-optimized Blob (200-300KB) to Storage.
- * The bucket must exist (Console → Build → Storage → Get Started).
- */
-export function uploadImageBlob(
-  blob: Blob,
-  fileName: string,
-  contentType: string,
-  onProgress?: (pct: number) => void
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const safe = fileName.toLowerCase().replace(/[^a-z0-9.]+/g, '-').slice(0, 80);
-    const storageRef = ref(storage, `menu-items/${Date.now()}-${safe}`);
-    const task = uploadBytesResumable(storageRef, blob, { contentType });
-
-    let settled = false;
-    const timeoutId = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try {
-        task.cancel();
-      } catch {
-        // ignore
-      }
-      reject(
-        new Error(
-          'Upload stuck for 60s. In Console go to Build → Storage → Get Started to create the bucket, then retry.'
-        )
-      );
-    }, 60000);
-
-    task.on(
-      'state_changed',
-      (snap) => {
-        onProgress?.(Math.round((snap.bytesTransferred / snap.totalBytes) * 100));
-      },
-      (err) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        if (err.code === 'storage/unauthorized') {
-          reject(new Error('Storage permission denied. In Console → Storage → Security, allow read + write to publish.'));
-        } else if (err.code === 'storage/canceled') {
-          reject(new Error('Upload was cancelled.'));
-        } else if (err.code === 'storage/bucket-not-found' || err.code === 'storage/project-not-found') {
-          reject(new Error('Storage bucket not found. In Console go to Build → Storage → Get Started to create the bucket.'));
-        } else if (err.code === 'storage/retry-limit-exceeded' || err.code === 'storage/unknown') {
-          reject(new Error('Network/bucket issue. Confirm the Storage bucket exists, then retry.'));
-        } else {
-          reject(new Error(`Upload fail: ${err.code || err.message}`));
-        }
-      },
-      async () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        try {
-          resolve(await getDownloadURL(task.snapshot.ref));
-        } catch (e) {
-          reject(e instanceof Error ? e : new Error('Download URL not received.'));
-        }
-      }
-    );
-  });
 }
 
 // ---------- Firestore: menuItems collection (same menu on all devices) ----------

@@ -39,6 +39,8 @@ export const OWNER_USERNAME = 'owner';
 export const normalizeUsername = (u: string) => u.trim().toLowerCase();
 export const isValidUsername = (u: string) => /^[a-z0-9][a-z0-9.-]{2,29}$/.test(u);
 const toEmail = (username: string) => `${normalizeUsername(username)}@${STAFF_EMAIL_DOMAIN}`;
+/** Staff logins are usernames on the staff domain; everything else (Google sign-in) is a customer. */
+export const isStaffEmail = (email?: string | null) => !!email && email.toLowerCase().endsWith(`@${STAFF_EMAIL_DOMAIN}`);
 
 export const auth: Auth = getAuth(app);
 const STAFF = 'staff';
@@ -109,7 +111,8 @@ export function watchStaffSession(cb: (s: StaffSession) => void): () => void {
   const unsubAuth = onAuthStateChanged(auth, (user) => {
     unsubProfile?.();
     unsubProfile = null;
-    if (!user) {
+    // A customer signed in with Google is not staff: show the staff login, never sign them out.
+    if (!user || !isStaffEmail(user.email)) {
       cb({ status: 'signed-out' });
       return;
     }
@@ -117,7 +120,11 @@ export function watchStaffSession(cb: (s: StaffSession) => void): () => void {
     const ref = doc(db, STAFF, user.uid);
     unsubProfile = onSnapshot(
       ref,
+      { includeMetadataChanges: true },
       async (snap) => {
+        // Wait until the server has the profile (first owner sign-in writes it from this device),
+        // otherwise the store's orders are asked for before the rules can see the profile.
+        if (snap.metadata.hasPendingWrites) return;
         const username = (user.email || '').split('@')[0];
         if (!snap.exists()) {
           // First sign-in of the owner login: create its profile.

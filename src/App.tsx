@@ -51,7 +51,7 @@ import { AdminLayout } from './components/admin/AdminLayout';
 import { AdminLogin } from './components/admin/AdminLogin';
 import { AdminDelivery } from './components/admin/AdminDelivery';
 import { AdminOrder, SEED_ADMIN_ORDERS, newOrderId } from './components/admin/adminData';
-import { watchStaffSession, staffSignOut, type StaffSession } from './lib/auth';
+import { watchStaffSession, staffSignOut, isStaffEmail, type StaffSession } from './lib/auth';
 import { can } from './components/admin/permissions';
 import { getOutletById, findNearestOutlet, geoDistanceKm, resolveOutletForOrder, parseOutletQrParam, parseTableQrParam, getTableById, setLiveOutlets, useOutlets, isOutletOpen, formatHour, SEED_OUTLETS } from './components/admin/outlets';
 import {
@@ -1133,7 +1133,8 @@ export default function App() {
   // Sync customerProfile with persistent Firebase Auth session
   useEffect(() => {
     const unsub = subscribeToAuth((fbUser) => {
-      if (fbUser) {
+      // Staff usernames (…@staff.7cheesepizza.com) are not customer accounts.
+      if (fbUser && !isStaffEmail(fbUser.email)) {
         setCustomerProfile((prev) => {
           const updated: CustomerProfile = {
             name: fbUser.displayName || prev?.name || 'Customer',
