@@ -252,7 +252,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               <div className="min-w-0">
                 <div className="flex items-center gap-1 text-xs font-bold text-[#ED1C24]"><MapPin className="w-3.5 h-3.5 shrink-0" />
                   <span className="truncate">
-                    {currentAddress.label}
+                    {currentAddress.id === 'addr-none' ? 'Set location' : currentAddress.label}
                   </span>
                   <ChevronDown className="w-3.5 h-3.5 shrink-0 text-slate-400" />
                 </div>

@@ -17,6 +17,8 @@ import {
   OLD_LUNCH_PRICES,
   CRAVING_CATEGORIES,
   DEFAULT_ADDRESSES,
+  NO_ADDRESS,
+  isDemoAddress,
   COUPONS,
   SIZE_PRICE_MODIFIERS,
   CRUST_PRICE_MODIFIERS
@@ -32,6 +34,7 @@ import { FilterSheet } from './components/FilterSheet';
 import { BuildYourOwnWizard } from './components/BuildYourOwnWizard';
 import { OfferDetailSheet } from './components/OfferDetailSheet';
 import { OffersPage } from './components/OffersPage';
+import { StorePicker } from './components/StorePicker';
 import { HeroBanner, DEFAULT_SLIDES, BannerSlide } from './components/HeroBanner';
 import { CravingCategories } from './components/CravingCategories';
 import { CategoryMarquee } from './components/CategoryMarquee';
@@ -53,7 +56,7 @@ import { AdminDelivery } from './components/admin/AdminDelivery';
 import { AdminOrder, SEED_ADMIN_ORDERS, newOrderId } from './components/admin/adminData';
 import { watchStaffSession, staffSignOut, isStaffEmail, type StaffSession } from './lib/auth';
 import { can } from './components/admin/permissions';
-import { getOutletById, findNearestOutlet, geoDistanceKm, resolveOutletForOrder, parseOutletQrParam, parseTableQrParam, getTableById, setLiveOutlets, useOutlets, isOutletOpen, formatHour, SEED_OUTLETS } from './components/admin/outlets';
+import { getOutletById, findDeliveryOutlet, geoDistanceKm, OUTLETS, parseOutletQrParam, parseTableQrParam, getTableById, setLiveOutlets, useOutlets, isOutletOpen, formatHour, SEED_OUTLETS } from './components/admin/outlets';
 import {
   saveMenuItemToFirestore,
   deleteMenuItemFromFirestore,
@@ -280,6 +283,8 @@ export default function App() {
   // Table QR se aaya customer = Dine-in, ussi table pe locked.
   useEffect(() => {
     if (qrTable) setOrderType('DINE_IN');
+    else if (qrOutletId && new URLSearchParams(window.location.search).get('outlet')) setOrderType('TAKEAWAY');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qrTable]);
   
   // Store Images State (hero slides + categories, editable from Admin → Store Images)
@@ -765,7 +770,7 @@ export default function App() {
   
   // Addresses (legacy 'Train' addresses are dropped — train delivery removed)
   const dropTrainAddresses = (list: UserAddress[]): UserAddress[] =>
-    (Array.isArray(list) ? list : []).filter((a) => (a.label as string) !== 'Train');
+    (Array.isArray(list) ? list : []).filter((a) => (a.label as string) !== 'Train' && !isDemoAddress(a));
   const [addresses, setAddresses] = useState<UserAddress[]>(() => {
     const saved = localStorage.getItem('seven_cheese_addresses') || localStorage.getItem('dominos_addresses');
     if (!saved) return DEFAULT_ADDRESSES;
@@ -776,7 +781,7 @@ export default function App() {
       return DEFAULT_ADDRESSES;
     }
   });
-  const [currentAddress, setCurrentAddress] = useState<UserAddress>(() => addresses[0] || DEFAULT_ADDRESSES[0]);
+  const [currentAddress, setCurrentAddress] = useState<UserAddress>(() => addresses[0] || NO_ADDRESS);
 
   // ---- Live outlet distance: boot pe EK BAR GPS permission mango, outlet se kitni door ho pata chale ----
   // Browser permission ek bar mangta hai, uske baad yaad rakhta hai. Fix localStorage me persist taaki reload pe prompt na doharaye.
@@ -802,6 +807,30 @@ export default function App() {
     userGps ? 'locked' : 'idle'
   );
 
+  // Use this location as the delivery address and confirm the store it routes to.
+  const applyGpsFix = React.useCallback((fix: { lat: number; lng: number }) => {
+    void reverseGeocode(fix.lat, fix.lng).then((place) => {
+      const store = findDeliveryOutlet(fix.lat, fix.lng);
+      const addr: UserAddress = {
+        id: 'addr-current-location',
+        label: 'Current location',
+        address: place.address,
+        city: place.city,
+        pincode: place.pincode,
+        lat: fix.lat,
+        lng: fix.lng,
+        distanceKm: store.distanceKm,
+      };
+      setAddresses((prev) => [addr, ...prev.filter((a) => a.id !== addr.id)]);
+      setCurrentAddress(addr);
+      setLocationNote(
+        store.inZone
+          ? `Delivering to ${place.address}${place.city ? ', ' + place.city : ''} · from ${store.outlet.shortName} (${store.distanceKm} km)`
+          : `We don't deliver to ${place.city || 'this area'} yet · nearest store: ${store.outlet.shortName} (${store.distanceKm} km)`,
+      );
+    });
+  }, []);
+
   const requestGps = React.useCallback(() => {
     if (!('geolocation' in navigator)) {
       setGpsState('denied');
@@ -818,29 +847,17 @@ export default function App() {
         } catch {
           // ignore
         }
-        // Use this location as the delivery address and confirm the outlet it routes to.
-        void reverseGeocode(fix.lat, fix.lng).then((place) => {
-          const nearest = findNearestOutlet(fix.lat, fix.lng);
-          const addr: UserAddress = {
-            id: 'addr-current-location',
-            label: 'Current location',
-            address: place.address,
-            city: place.city,
-            pincode: place.pincode,
-            lat: fix.lat,
-            lng: fix.lng,
-            distanceKm: nearest.distanceKm,
-          };
-          setAddresses((prev) => [addr, ...prev.filter((a) => a.id !== addr.id)]);
-          setCurrentAddress(addr);
-          setLocationNote(
-            `Delivering to ${place.address}${place.city ? ', ' + place.city : ''} · nearest store: ${nearest.outlet.shortName} (${nearest.distanceKm} km)`,
-          );
-        });
+        applyGpsFix(fix);
       },
       () => setGpsState('denied'),
       { enableHighAccuracy: true, timeout: 12000, maximumAge: 600000 }
     );
+  }, [applyGpsFix]);
+
+  // A phone that saved a GPS fix but has no address any more gets its address back from the fix.
+  useEffect(() => {
+    if (userGps && currentAddress.id === NO_ADDRESS.id) applyGpsFix(userGps);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Location prompt dismissal — once per session, so it never nags.
@@ -871,18 +888,44 @@ export default function App() {
     });
   }, [staffSession.status, staff, myOrderIds, pendingOrderIds]);
 
-  // Badge distance priority: real GPS fix > selected address ka GPS pin > purana hardcoded distanceKm
-  const outletInfo = useMemo(() => {
-    if (typeof currentAddress.lat === 'number' && typeof currentAddress.lng === 'number') {
-      return findNearestOutlet(currentAddress.lat, currentAddress.lng);
-    }
-    if (userGps) return findNearestOutlet(userGps.lat, userGps.lng);
-    return resolveOutletForOrder(currentAddress.lat, currentAddress.lng);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userGps, currentAddress.lat, currentAddress.lng, liveOutlets]);
+  // Clock for store hours and day/time scheduled offers (Tuesday, Friday, lunch 11am-2pm); ticks every minute.
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
-  // The store this customer's order goes to: a QR scan wins, else the nearest store.
-  const customerOutlet = qrOutlet ?? outletInfo.outlet;
+  // Which store serves this customer. The selected address decides; a GPS fix only helps while browsing.
+  const hasAddress = currentAddress.id !== NO_ADDRESS.id;
+  const addressPinned = typeof currentAddress.lat === 'number' && typeof currentAddress.lng === 'number';
+  const outletInfo = useMemo(() => {
+    if (addressPinned) return findDeliveryOutlet(currentAddress.lat as number, currentAddress.lng as number, now);
+    if (!hasAddress && userGps) return findDeliveryOutlet(userGps.lat, userGps.lng, now);
+    return null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userGps, currentAddress.lat, currentAddress.lng, addressPinned, hasAddress, liveOutlets, now]);
+
+  // Store chosen for pick-up (customers outside delivery, or by choice).
+  const [pickupStoreId, setPickupStoreId] = useState<string | null>(() => qrOutletId);
+  const [isStorePickerOpen, setIsStorePickerOpen] = useState(false);
+  const pickupOutlet = pickupStoreId ? getOutletById(pickupStoreId) ?? null : null;
+
+  // The store this customer's order goes to: a QR scan wins, then pick-up, then delivery.
+  // Before a location is known the first store only fills in the menu; checkout stays blocked.
+  const customerOutlet = qrOutlet ?? (orderType === 'TAKEAWAY' ? pickupOutlet : null) ?? outletInfo?.outlet ?? OUTLETS[0];
+
+  // Delivery needs a real, pinned address inside a store's delivery radius.
+  const deliveryBlock =
+    orderType !== 'DELIVERY'
+      ? null
+      : !hasAddress
+        ? { message: 'Choose your delivery location to place the order.' }
+        : !addressPinned
+          ? { message: 'Pin this address on the map so we can find your nearest store.', canPin: true }
+          : !qrOutlet && outletInfo && !outletInfo.inZone
+            ? { message: `We don't deliver to this address yet. Nearest store: ${outletInfo.outlet.shortName} (${outletInfo.distanceKm} km).` }
+            : null;
+
   // Items that store has marked sold out.
   const [storeSoldOut, setStoreSoldOut] = useState<Set<string>>(() => new Set());
   useEffect(
@@ -902,12 +945,6 @@ export default function App() {
   });
   const [appliedCoupon, setAppliedCoupon] = useState<Coupon | null>(null);
 
-  // Clock for day/time scheduled offers (Tuesday, Friday, lunch 11am-2pm); ticks every minute.
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), 60_000);
-    return () => window.clearInterval(id);
-  }, []);
   const activeCoupons = useMemo(() => coupons.filter((c) => isOfferActive(c, now)), [coupons, now]);
   // Tuesday / Friday are day-deal days: the lunch offer takes a back seat all day.
   const dayDealDay = isDayDealDay(now);
@@ -923,7 +960,7 @@ export default function App() {
     [menuItems, now, dayDealDay, storeSoldOut],
   );
   // Outside opening hours (or switched off) the store takes no online orders.
-  const storeClosedNote = isOutletOpen(customerOutlet, now)
+  const storeClosedNote = deliveryBlock || isOutletOpen(customerOutlet, now)
     ? ''
     : customerOutlet.active === false
       ? `${customerOutlet.shortName} store is not taking orders right now.`
@@ -1063,7 +1100,7 @@ export default function App() {
     const d = new Date();
     return `seven_cheese_deal_seen_${id}_${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
   };
-  const locationGateOpen = !locPromptDismissed && !qrOutletId && !userGps && gpsState !== 'locked';
+  const locationGateOpen = !locPromptDismissed && !qrOutletId && !hasAddress && !userGps && gpsState !== 'locked';
   useEffect(() => {
     if (dealPopupId || locationGateOpen) return;
     const next = timedDeals.find((d) => {
@@ -1305,12 +1342,12 @@ export default function App() {
     setCurrentAddress((prev) => {
       if (prev.id !== id) return prev;
       const remaining = addresses.filter((a) => a.id !== id);
-      return remaining[0] || DEFAULT_ADDRESSES[0];
+      return remaining[0] || NO_ADDRESS;
     });
   };
 
   const handlePlaceOrder = (notes: string, paymentMethod?: string, delivery?: DeliveryDetails) => {
-    if (storeClosedNote) return;
+    if (storeClosedNote || deliveryBlock) return;
     const subtotal = cartTotal;
     const couponValid = appliedCoupon && isOfferActive(appliedCoupon, new Date()) ? appliedCoupon : null;
     const isFreeDel = subtotal >= 99;
@@ -1332,7 +1369,7 @@ export default function App() {
     const etaKm =
       typeof currentAddress.lat === 'number' && typeof currentAddress.lng === 'number'
         ? geoDistanceKm(currentAddress.lat, currentAddress.lng, etaOutlet.lat, etaOutlet.lng)
-        : outletInfo.distanceKm || 3;
+        : outletInfo?.distanceKm || 3;
     const etaMinutes = Math.min(60, Math.max(20, Math.round(15 + etaKm * 3)));
 
     // One id + number shared by the customer's tracker and the restaurant's order.
@@ -1360,7 +1397,7 @@ export default function App() {
       adminOrderId,
       items: [...cartItems, ...(freeGiftLine ? [freeGiftLine] : [])],
       orderType,
-      address: `${currentAddress.address}, ${currentAddress.city}`,
+      address: orderType === 'DELIVERY' ? `${currentAddress.address}, ${currentAddress.city}` : customerOutlet.address,
       subtotal,
       deliveryFee,
       tax: taxesAndCharges,
@@ -1403,10 +1440,10 @@ export default function App() {
       outletId: orderOutlet.id,
       customerName: receiverName,
       customerPhone: receiverPhone,
-      orderType: orderType === 'DINE_IN' ? 'DINE_IN' : 'DELIVERY',
-      // Dine-in orders are served at the table — no street address on them.
-      address: orderType === 'DINE_IN' ? undefined : fullDeliveryAddress,
-      landmark: orderType === 'DINE_IN' ? undefined : orderLandmark || undefined,
+      orderType,
+      // Only delivery orders carry a street address.
+      address: orderType === 'DELIVERY' ? fullDeliveryAddress : undefined,
+      landmark: orderType === 'DELIVERY' ? orderLandmark || undefined : undefined,
       tableNumber: orderType === 'DINE_IN' ? (qrTable?.name ?? 'Table T-01') : undefined,
       items: [...cartItems, ...(freeGiftLine ? [freeGiftLine] : [])].map((c) => ({
         name: c.name,
@@ -1854,7 +1891,7 @@ export default function App() {
         setVegOnly={setVegOnly}
         nonVegOnly={nonVegOnly}
         setNonVegOnly={setNonVegOnly}
-        outletDistanceKm={outletInfo.distanceKm}
+        outletDistanceKm={outletInfo?.distanceKm}
         gpsState={gpsState}
         onDetectLocation={requestGps}
         suggestions={searchSuggestions}
@@ -2413,6 +2450,10 @@ export default function App() {
         dayDeal={dayDeal}
         gstRate={customerOutlet.gstRate}
         storeClosedNote={storeClosedNote}
+        deliveryBlock={deliveryBlock}
+        storeName={orderType === 'TAKEAWAY' || outletInfo?.inZone || qrOutlet ? customerOutlet.shortName : ''}
+        onPickupInstead={qrTable ? undefined : () => setIsStorePickerOpen(true)}
+        onDeliverInstead={qrOutlet ? undefined : () => setOrderType('DELIVERY')}
         onProceedToCheckout={() => {
           setIsCartOpen(false);
           goView('billing');
@@ -2480,15 +2521,32 @@ export default function App() {
       />
 
       {/* First-visit location permission — Allow = GPS fix for outlet distance + routing */}
-      {!locPromptDismissed && !qrOutletId && (
+      {!locPromptDismissed && !qrOutletId && !hasAddress && (
         <LocationPrompt
           gpsState={gpsState}
           hasFix={!!userGps}
           hasCart={cartItemCount > 0}
           onAllow={requestGps}
           onDismiss={dismissLocPrompt}
+          onEnterAddress={() => {
+            dismissLocPrompt();
+            setIsAddressModalOpen(true);
+          }}
         />
       )}
+
+      <StorePicker
+        isOpen={isStorePickerOpen}
+        from={addressPinned ? { lat: currentAddress.lat as number, lng: currentAddress.lng as number } : userGps}
+        selectedId={pickupStoreId ?? undefined}
+        now={now}
+        onPick={(id) => {
+          setPickupStoreId(id);
+          setOrderType('TAKEAWAY');
+          setIsStorePickerOpen(false);
+        }}
+        onClose={() => setIsStorePickerOpen(false)}
+      />
 
       {/* Bottom Sticky Navigation */}
       <BottomNav

@@ -305,6 +305,20 @@ export function findNearestOutlet(lat: number, lng: number): NearestOutletResult
   return { outlet: best, distanceKm: Math.round(bestDist * 10) / 10, inZone: bestDist <= best.radiusKm };
 }
 
+/**
+ * The store that delivers to this point: the nearest open store whose delivery radius covers it,
+ * else the nearest in-radius store (closed for now). inZone:false = no store delivers here.
+ */
+export function findDeliveryOutlet(lat: number, lng: number, now: Date = new Date()): NearestOutletResult {
+  const covering = activeOutlets()
+    .map((outlet) => ({ outlet, km: geoDistanceKm(lat, lng, outlet.lat, outlet.lng) }))
+    .filter((s) => s.km <= s.outlet.radiusKm)
+    .sort((a, b) => a.km - b.km);
+  const best = covering.find((s) => isOutletOpen(s.outlet, now)) ?? covering[0];
+  if (!best) return findNearestOutlet(lat, lng);
+  return { outlet: best.outlet, distanceKm: Math.round(best.km * 10) / 10, inZone: true };
+}
+
 /** Assign an outlet to an order. Falls back to the first store when no GPS is available. */
 export function resolveOutletForOrder(lat?: number, lng?: number): NearestOutletResult {
   if (typeof lat === 'number' && typeof lng === 'number') {
