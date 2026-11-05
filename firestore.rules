@@ -68,6 +68,12 @@ service cloud.firestore {
       allow write: if isOwner();
     }
 
+    // Counter item codes: one list for all stores, editable by everyone except riders.
+    match /posCodes/{docId} {
+      allow read: if isStaff();
+      allow write: if isStaff() && me().role in ['owner', 'manager', 'staff'];
+    }
+
     // ---------- Orders ----------
     match /orders/{orderId} {
       // Customers (no login) place new orders for a real store; store staff save counter bills.

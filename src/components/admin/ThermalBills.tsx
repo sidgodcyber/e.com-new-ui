@@ -277,9 +277,9 @@ function printOne(html: string): Promise<void> {
         } catch {
           // ignore
         }
+        // print() returns once the job is sent (silent printing) or the print window is closed.
+        finish();
       }, 250);
-      // Silent (kiosk) printing returns quickly; a print window waits for the user. Never block the queue forever.
-      window.setTimeout(finish, 15_000);
     } catch (err) {
       console.warn('Thermal direct iframe print failed, falling back to popup', err);
       iframe?.remove();

@@ -814,6 +814,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               outlet={outlet}
               orders={visibleOrders}
               menuItems={menuItems.filter((m) => !soldOutIds.has(m.id))}
+              allMenuItems={menuItems}
               onCreateOrder={handleCounterCreateOrder}
               onAddItem={can(staff, 'edit-menu') ? onAddItem : undefined}
               onUpdateItem={can(staff, 'edit-menu') ? onUpdateItem : undefined}

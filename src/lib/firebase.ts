@@ -287,4 +287,25 @@ export async function setOutletSoldOut(outletId: string, itemId: string, soldOut
   );
 }
 
+// ---------- Firestore: counter item codes (one list for all stores) ----------
+
+const POS_CODES_DOC = ['posCodes', 'items'] as const;
+
+/** Saved codes (item id → code). Falls back to none, so the built-in codes keep working. */
+export function subscribeToPosCodes(onCodes: (codes: Record<string, string>) => void): () => void {
+  try {
+    return onSnapshot(
+      doc(db, ...POS_CODES_DOC),
+      (snap) => onCodes(((snap.exists() ? (snap.data() as { codes?: Record<string, string> }).codes : null) ?? {})),
+      () => onCodes({})
+    );
+  } catch {
+    return () => {};
+  }
+}
+
+export async function savePosCode(id: string, code: string): Promise<void> {
+  await setDoc(doc(db, ...POS_CODES_DOC), { codes: { [id]: code } }, { merge: true });
+}
+
 export { app, firebaseConfig };
